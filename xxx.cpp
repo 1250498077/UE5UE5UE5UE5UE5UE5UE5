@@ -1,12 +1,140 @@
 // WomenCharacter.cpp
 #include "WomenCharacter.h"
+#include "PickupActor.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Net/UnrealNetwork.h"
 
 namespace
 {
+    static const TArray<FName>& GetFirstPersonUpperMeshHiddenBoneNames()
+    {
+        static const TArray<FName> BoneNames =
+        {
+            TEXT("LeftUpLeg"),
+            TEXT("LeftLeg"),
+            TEXT("LeftFoot"),
+            TEXT("LeftToeBase"),
+            TEXT("LeftToe_End"),
+            TEXT("RightUpLeg"),
+            TEXT("RightLeg"),
+            TEXT("RightFoot"),
+            TEXT("RightToeBase"),
+            TEXT("RightToe_End"),
+            TEXT("Neck"),
+            TEXT("Head"),
+            TEXT("HeadTop_End")
+        };
+
+        return BoneNames;
+    }
+
+    static const TArray<FName>& GetFirstPersonLowerMeshHiddenBoneNames()
+    {
+        static const TArray<FName> BoneNames =
+        {
+            TEXT("Spine"),
+            TEXT("Spine1"),
+            TEXT("Spine2"),
+            TEXT("LeftShoulder"),
+            TEXT("LeftArm"),
+            TEXT("LeftForeArm"),
+            TEXT("LeftHand"),
+            TEXT("LeftHandIndex1"),
+            TEXT("LeftHandIndex2"),
+            TEXT("LeftHandIndex3"),
+            TEXT("LeftHandIndex4"),
+            TEXT("LeftHandMiddle1"),
+            TEXT("LeftHandMiddle2"),
+            TEXT("LeftHandMiddle3"),
+            TEXT("LeftHandMiddle4"),
+            TEXT("LeftHandPinky1"),
+            TEXT("LeftHandPinky2"),
+            TEXT("LeftHandPinky3"),
+            TEXT("LeftHandPinky4"),
+            TEXT("LeftHandRing1"),
+            TEXT("LeftHandRing2"),
+            TEXT("LeftHandRing3"),
+            TEXT("LeftHandRing4"),
+            TEXT("LeftHandThumb1"),
+            TEXT("LeftHandThumb2"),
+            TEXT("LeftHandThumb3"),
+            TEXT("LeftHandThumb4"),
+            TEXT("RightShoulder"),
+            TEXT("RightArm"),
+            TEXT("RightForeArm"),
+            TEXT("RightHand"),
+            TEXT("RightSocket"),
+            TEXT("RightHandIndex1"),
+            TEXT("RightHandIndex2"),
+            TEXT("RightHandIndex3"),
+            TEXT("RightHandIndex4"),
+            TEXT("RightHandMiddle1"),
+            TEXT("RightHandMiddle2"),
+            TEXT("RightHandMiddle3"),
+            TEXT("RightHandMiddle4"),
+            TEXT("RightHandPinky1"),
+            TEXT("RightHandPinky2"),
+            TEXT("RightHandPinky3"),
+            TEXT("RightHandPinky4"),
+            TEXT("RightHandRing1"),
+            TEXT("RightHandRing2"),
+            TEXT("RightHandRing3"),
+            TEXT("RightHandRing4"),
+            TEXT("RightHandThumb1"),
+            TEXT("RightHandThumb2"),
+            TEXT("RightHandThumb3"),
+            TEXT("RightHandThumb4"),
+            TEXT("Neck"),
+            TEXT("Head"),
+            TEXT("HeadTop_End")
+        };
+
+        return BoneNames;
+    }
+
+    static void HideBonesByNames(USkeletalMeshComponent* MeshComponent, const TArray<FName>& BoneNames)
+    {
+        if (!MeshComponent)
+        {
+            return;
+        }
+
+        for (const FName BoneName : BoneNames)
+        {
+            if (MeshComponent->GetBoneIndex(BoneName) != INDEX_NONE)
+            {
+                MeshComponent->HideBoneByName(BoneName, EPhysBodyOp::PBO_None);
+            }
+        }
+    }
+
+    static void CopySkeletalMeshSetup(USkeletalMeshComponent* TargetMesh, USkeletalMeshComponent* SourceMesh)
+    {
+        if (!TargetMesh || !SourceMesh)
+        {
+            return;
+        }
+
+        if (USkeletalMesh* SkeletalMesh = SourceMesh->GetSkeletalMeshAsset())
+        {
+            for (int32 MaterialIndex = 0; MaterialIndex < TargetMesh->GetNumMaterials(); ++MaterialIndex)
+            {
+                TargetMesh->SetMaterial(MaterialIndex, nullptr);
+            }
+
+            TargetMesh->SetSkeletalMeshAsset(SkeletalMesh);
+
+            const int32 MaterialCount = SourceMesh->GetNumMaterials();
+            for (int32 MaterialIndex = 0; MaterialIndex < MaterialCount; ++MaterialIndex)
+            {
+                TargetMesh->SetMaterial(MaterialIndex, SourceMesh->GetMaterial(MaterialIndex));
+            }
+        }
+    }
+
     static void ConfigureModularMeshComponent(USkeletalMeshComponent* MeshComponent, USkeletalMeshComponent* ParentMesh)
     {
         if (!MeshComponent || !ParentMesh)
@@ -15,6 +143,8 @@ namespace
         }
 
         MeshComponent->SetupAttachment(ParentMesh);
+        MeshComponent->SetOnlyOwnerSee(false);
+        MeshComponent->SetOwnerNoSee(false);
         MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
         MeshComponent->SetGenerateOverlapEvents(false);
         MeshComponent->SetCastShadow(true);
@@ -30,7 +160,7 @@ AWomenCharacter::AWomenCharacter()
 
     // Third-person full body: other players can see it,
     // but it still casts the owner's full-body shadow.
-    GetMesh()->SetOwnerNoSee(true);
+    GetMesh()->SetOwnerNoSee(false);
     GetMesh()->SetCastShadow(true);
     GetMesh()->bCastHiddenShadow = true;
 
@@ -45,8 +175,7 @@ AWomenCharacter::AWomenCharacter()
 
     FirstPersonCameraComponent->bUsePawnControlRotation = true;
 
-    // First-person mesh: only the owning player sees it. It should not cast world shadows.
-    // Usually this mesh contains first-person arms and visible lower body/legs, but no head.
+    // 第一人称上半身/手臂: 挂在相机下, 跟随视角 Pitch。
     FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonMesh"));
     FirstPersonMesh->SetupAttachment(FirstPersonCameraComponent);
     FirstPersonMesh->SetOnlyOwnerSee(true);
@@ -56,6 +185,31 @@ AWomenCharacter::AWomenCharacter()
     FirstPersonMesh->bCastHiddenShadow = false;
     FirstPersonMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     FirstPersonMesh->SetGenerateOverlapEvents(false);
+
+    // 第一人称下半身: 挂在身体坐标系下, 不跟随相机 Pitch。
+    FirstPersonLowerBodyMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonLowerBodyMesh"));
+    FirstPersonLowerBodyMesh->SetupAttachment(GetCapsuleComponent());
+    FirstPersonLowerBodyMesh->SetRelativeLocation(GetMesh()->GetRelativeLocation());
+    FirstPersonLowerBodyMesh->SetRelativeRotation(GetMesh()->GetRelativeRotation());
+    FirstPersonLowerBodyMesh->SetRelativeScale3D(GetMesh()->GetRelativeScale3D());
+    FirstPersonLowerBodyMesh->SetOnlyOwnerSee(true);
+    FirstPersonLowerBodyMesh->SetOwnerNoSee(false);
+    FirstPersonLowerBodyMesh->SetCastShadow(false);
+    FirstPersonLowerBodyMesh->bCastDynamicShadow = false;
+    FirstPersonLowerBodyMesh->bCastHiddenShadow = false;
+    FirstPersonLowerBodyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    FirstPersonLowerBodyMesh->SetGenerateOverlapEvents(false);
+
+    ThirdPersonHeldItemDebugMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ThirdPersonHeldItemDebugMesh"));
+    ThirdPersonHeldItemDebugMesh->SetupAttachment(GetMesh());
+    ThirdPersonHeldItemDebugMesh->SetOnlyOwnerSee(true);
+    ThirdPersonHeldItemDebugMesh->SetOwnerNoSee(false);
+    ThirdPersonHeldItemDebugMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    ThirdPersonHeldItemDebugMesh->SetGenerateOverlapEvents(false);
+    ThirdPersonHeldItemDebugMesh->SetCastShadow(false);
+    ThirdPersonHeldItemDebugMesh->bCastDynamicShadow = false;
+    ThirdPersonHeldItemDebugMesh->bCastHiddenShadow = false;
+    ThirdPersonHeldItemDebugMesh->SetHiddenInGame(true);
 
     HeadMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("HeadMesh"));
     ConfigureModularMeshComponent(HeadMesh, GetMesh());
@@ -161,6 +315,41 @@ void AWomenCharacter::RefreshModularMeshes()
         return;
     }
 
+    BaseMesh->SetOnlyOwnerSee(false);
+    BaseMesh->SetOwnerNoSee(false);
+    BaseMesh->SetCastShadow(true);
+    BaseMesh->bCastDynamicShadow = true;
+
+    if (FirstPersonMesh)
+    {
+        FirstPersonMesh->SetOnlyOwnerSee(true);
+        FirstPersonMesh->SetOwnerNoSee(false);
+        HideBonesByNames(FirstPersonMesh, GetFirstPersonUpperMeshHiddenBoneNames());
+    }
+
+    if (FirstPersonLowerBodyMesh)
+    {
+        if (!FirstPersonLowerBodyMesh->GetSkeletalMeshAsset())
+        {
+            if (FirstPersonMesh && FirstPersonMesh->GetSkeletalMeshAsset())
+            {
+                CopySkeletalMeshSetup(FirstPersonLowerBodyMesh, FirstPersonMesh);
+            }
+            else
+            {
+                CopySkeletalMeshSetup(FirstPersonLowerBodyMesh, BaseMesh);
+            }
+        }
+
+        FirstPersonLowerBodyMesh->SetOnlyOwnerSee(true);
+        FirstPersonLowerBodyMesh->SetOwnerNoSee(false);
+        FirstPersonLowerBodyMesh->SetRelativeLocation(BaseMesh->GetRelativeLocation());
+        FirstPersonLowerBodyMesh->SetRelativeRotation(BaseMesh->GetRelativeRotation());
+        FirstPersonLowerBodyMesh->SetRelativeScale3D(BaseMesh->GetRelativeScale3D());
+        FirstPersonLowerBodyMesh->SetLeaderPoseComponent(BaseMesh);
+        HideBonesByNames(FirstPersonLowerBodyMesh, GetFirstPersonLowerMeshHiddenBoneNames());
+    }
+
     TArray<USkeletalMeshComponent*> ModularMeshes =
     {
         HeadMesh,
@@ -178,6 +367,8 @@ void AWomenCharacter::RefreshModularMeshes()
             continue;
         }
 
+        ModularMesh->SetOnlyOwnerSee(false);
+        ModularMesh->SetOwnerNoSee(false); 
         ModularMesh->SetLeaderPoseComponent(BaseMesh);
         ModularMesh->SetRelativeLocation(FVector::ZeroVector);
         ModularMesh->SetRelativeRotation(FRotator::ZeroRotator);
@@ -188,4 +379,49 @@ void AWomenCharacter::RefreshModularMeshes()
 void AWomenCharacter::RebuildModularMeshes()
 {
     RefreshModularMeshes();
+}
+
+void AWomenCharacter::ShowHeldItemThirdPersonDebugMesh(APickupActor* PickupActor)
+{
+    if (!ThirdPersonHeldItemDebugMesh || !PickupActor || !GetMesh())
+    {
+        return;
+    }
+
+    UStaticMeshComponent* PickupMeshComponent = PickupActor->GetPickupMeshComponent();
+    if (!PickupMeshComponent)
+    {
+        HideHeldItemThirdPersonDebugMesh();
+        return;
+    }
+
+    ThirdPersonHeldItemDebugMesh->SetStaticMesh(PickupMeshComponent->GetStaticMesh());
+    ThirdPersonHeldItemDebugMesh->EmptyOverrideMaterials();
+
+    const int32 MaterialCount = PickupMeshComponent->GetNumMaterials();
+    for (int32 MaterialIndex = 0; MaterialIndex < MaterialCount; ++MaterialIndex)
+    {
+        ThirdPersonHeldItemDebugMesh->SetMaterial(MaterialIndex, PickupMeshComponent->GetMaterial(MaterialIndex));
+    }
+
+    ThirdPersonHeldItemDebugMesh->AttachToComponent(
+        GetMesh(),
+        FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+        PickupActor->GetThirdPersonSocketName());
+    ThirdPersonHeldItemDebugMesh->SetRelativeLocation(PickupActor->GetThirdPersonLocationOffset());
+    ThirdPersonHeldItemDebugMesh->SetRelativeRotation(PickupActor->GetThirdPersonRotationOffset());
+    ThirdPersonHeldItemDebugMesh->SetRelativeScale3D(PickupMeshComponent->GetRelativeScale3D());
+    ThirdPersonHeldItemDebugMesh->SetHiddenInGame(false);
+}
+
+void AWomenCharacter::HideHeldItemThirdPersonDebugMesh()
+{
+    if (!ThirdPersonHeldItemDebugMesh)
+    {
+        return;
+    }
+
+    ThirdPersonHeldItemDebugMesh->SetStaticMesh(nullptr);
+    ThirdPersonHeldItemDebugMesh->EmptyOverrideMaterials();
+    ThirdPersonHeldItemDebugMesh->SetHiddenInGame(true);
 }
