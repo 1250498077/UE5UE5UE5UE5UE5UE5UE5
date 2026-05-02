@@ -160,9 +160,11 @@ AWomenCharacter::AWomenCharacter()
 
     // Third-person full body: other players can see it,
     // but it still casts the owner's full-body shadow.
-    GetMesh()->SetOwnerNoSee(false);
+    GetMesh()->SetOwnerNoSee(true);
+    GetMesh()->SetHiddenInGame(true);
     GetMesh()->SetCastShadow(true);
     GetMesh()->bCastHiddenShadow = true;
+    GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 
 
     PrimaryActorTick.bCanEverTick = true;
@@ -178,8 +180,12 @@ AWomenCharacter::AWomenCharacter()
     // 第一人称上半身/手臂: 挂在相机下, 跟随视角 Pitch。
     FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonMesh"));
     FirstPersonMesh->SetupAttachment(FirstPersonCameraComponent);
+    FirstPersonMesh->SetRelativeLocation(GetMesh()->GetRelativeLocation() + FirstPersonUpperBodyLocationOffset);
+    FirstPersonMesh->SetRelativeRotation(GetMesh()->GetRelativeRotation() + FirstPersonUpperBodyRotationOffset);
+    FirstPersonMesh->SetRelativeScale3D(GetMesh()->GetRelativeScale3D());
     FirstPersonMesh->SetOnlyOwnerSee(true);
-    FirstPersonMesh->SetOwnerNoSee(false);
+    FirstPersonMesh->SetOwnerNoSee(true);
+    FirstPersonMesh->SetHiddenInGame(true);
     FirstPersonMesh->SetCastShadow(false);
     FirstPersonMesh->bCastDynamicShadow = false;
     FirstPersonMesh->bCastHiddenShadow = false;
@@ -189,16 +195,18 @@ AWomenCharacter::AWomenCharacter()
     // 第一人称下半身: 挂在身体坐标系下, 不跟随相机 Pitch。
     FirstPersonLowerBodyMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonLowerBodyMesh"));
     FirstPersonLowerBodyMesh->SetupAttachment(GetCapsuleComponent());
-    FirstPersonLowerBodyMesh->SetRelativeLocation(GetMesh()->GetRelativeLocation());
-    FirstPersonLowerBodyMesh->SetRelativeRotation(GetMesh()->GetRelativeRotation());
+    FirstPersonLowerBodyMesh->SetRelativeLocation(GetMesh()->GetRelativeLocation() + FirstPersonLowerBodyLocationOffset);
+    FirstPersonLowerBodyMesh->SetRelativeRotation(GetMesh()->GetRelativeRotation() + FirstPersonLowerBodyRotationOffset);
     FirstPersonLowerBodyMesh->SetRelativeScale3D(GetMesh()->GetRelativeScale3D());
     FirstPersonLowerBodyMesh->SetOnlyOwnerSee(true);
     FirstPersonLowerBodyMesh->SetOwnerNoSee(false);
+    FirstPersonLowerBodyMesh->SetHiddenInGame(true);
     FirstPersonLowerBodyMesh->SetCastShadow(false);
     FirstPersonLowerBodyMesh->bCastDynamicShadow = false;
     FirstPersonLowerBodyMesh->bCastHiddenShadow = false;
     FirstPersonLowerBodyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     FirstPersonLowerBodyMesh->SetGenerateOverlapEvents(false);
+    FirstPersonLowerBodyMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 
     ThirdPersonHeldItemDebugMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ThirdPersonHeldItemDebugMesh"));
     ThirdPersonHeldItemDebugMesh->SetupAttachment(GetMesh());
@@ -316,15 +324,31 @@ void AWomenCharacter::RefreshModularMeshes()
     }
 
     BaseMesh->SetOnlyOwnerSee(false);
-    BaseMesh->SetOwnerNoSee(false);
+    BaseMesh->SetOwnerNoSee(true);
+    BaseMesh->SetHiddenInGame(true);
     BaseMesh->SetCastShadow(true);
     BaseMesh->bCastDynamicShadow = true;
+    BaseMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 
     if (FirstPersonMesh)
     {
         FirstPersonMesh->SetOnlyOwnerSee(true);
-        FirstPersonMesh->SetOwnerNoSee(false);
-        HideBonesByNames(FirstPersonMesh, GetFirstPersonUpperMeshHiddenBoneNames());
+        FirstPersonMesh->SetOwnerNoSee(true);
+         BaseMesh->SetHiddenInGame(true);
+
+        if (FirstPersonMesh->GetSkeletalMeshAsset())
+        {
+            CopySkeletalMeshSetup(FirstPersonMesh, BaseMesh);
+        }
+
+        if (!FirstPersonMesh->GetSkeletalMeshAsset())
+        {
+            FirstPersonMesh->SetRelativeLocation(BaseMesh->GetRelativeLocation());
+            FirstPersonMesh->SetRelativeRotation(BaseMesh->GetRelativeRotation());
+            FirstPersonMesh->SetRelativeScale3D(BaseMesh->GetRelativeScale3D());
+            HideBonesByNames(FirstPersonMesh,
+                GetFirstPersonUpperMeshHiddenBoneNames());
+        }
     }
 
     if (FirstPersonLowerBodyMesh)
@@ -343,9 +367,11 @@ void AWomenCharacter::RefreshModularMeshes()
 
         FirstPersonLowerBodyMesh->SetOnlyOwnerSee(true);
         FirstPersonLowerBodyMesh->SetOwnerNoSee(false);
+        FirstPersonLowerBodyMesh->SetHiddenInGame(false);
         FirstPersonLowerBodyMesh->SetRelativeLocation(BaseMesh->GetRelativeLocation());
         FirstPersonLowerBodyMesh->SetRelativeRotation(BaseMesh->GetRelativeRotation());
         FirstPersonLowerBodyMesh->SetRelativeScale3D(BaseMesh->GetRelativeScale3D());
+        FirstPersonLowerBodyMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
         FirstPersonLowerBodyMesh->SetLeaderPoseComponent(BaseMesh);
         HideBonesByNames(FirstPersonLowerBodyMesh, GetFirstPersonLowerMeshHiddenBoneNames());
     }
@@ -369,6 +395,7 @@ void AWomenCharacter::RefreshModularMeshes()
 
         ModularMesh->SetOnlyOwnerSee(false);
         ModularMesh->SetOwnerNoSee(false); 
+        ModularMesh->SetHiddenInGame(true);
         ModularMesh->SetLeaderPoseComponent(BaseMesh);
         ModularMesh->SetRelativeLocation(FVector::ZeroVector);
         ModularMesh->SetRelativeRotation(FRotator::ZeroRotator);
