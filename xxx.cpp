@@ -144,7 +144,7 @@ namespace
 
         MeshComponent->SetupAttachment(ParentMesh);
         MeshComponent->SetOnlyOwnerSee(false);
-        MeshComponent->SetOwnerNoSee(false);
+        MeshComponent->SetOwnerNoSee(true);
         MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
         MeshComponent->SetGenerateOverlapEvents(false);
         MeshComponent->SetCastShadow(true);
@@ -160,8 +160,8 @@ AWomenCharacter::AWomenCharacter()
 
     // Third-person full body: other players can see it,
     // but it still casts the owner's full-body shadow.
-    GetMesh()->SetOwnerNoSee(true);
-    GetMesh()->SetHiddenInGame(true);
+    GetMesh()->SetOwnerNoSee(false);
+    GetMesh()->SetHiddenInGame(false);
     GetMesh()->SetCastShadow(true);
     GetMesh()->bCastHiddenShadow = true;
     GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
@@ -324,8 +324,8 @@ void AWomenCharacter::RefreshModularMeshes()
     }
 
     BaseMesh->SetOnlyOwnerSee(false);
-    BaseMesh->SetOwnerNoSee(true);
-    BaseMesh->SetHiddenInGame(true);
+    BaseMesh->SetOwnerNoSee(false);
+    BaseMesh->SetHiddenInGame(false);
     BaseMesh->SetCastShadow(true);
     BaseMesh->bCastDynamicShadow = true;
     BaseMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
@@ -334,7 +334,7 @@ void AWomenCharacter::RefreshModularMeshes()
     {
         FirstPersonMesh->SetOnlyOwnerSee(true);
         FirstPersonMesh->SetOwnerNoSee(true);
-         BaseMesh->SetHiddenInGame(true);
+        BaseMesh->SetHiddenInGame(false);
 
         if (FirstPersonMesh->GetSkeletalMeshAsset())
         {
@@ -394,7 +394,7 @@ void AWomenCharacter::RefreshModularMeshes()
         }
 
         ModularMesh->SetOnlyOwnerSee(false);
-        ModularMesh->SetOwnerNoSee(false); 
+        ModularMesh->SetOwnerNoSee(true); 
         ModularMesh->SetHiddenInGame(true);
         ModularMesh->SetLeaderPoseComponent(BaseMesh);
         ModularMesh->SetRelativeLocation(FVector::ZeroVector);
