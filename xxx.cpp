@@ -1,639 +1,70 @@
-#include "WomenNativeAnimInstance.h"
-
-#include "Animation/AnimMontage.h"
-#include "Animation/AnimSequenceBase.h"
-#include "GameFramework/Pawn.h"
-#include "Kismet/KismetMathLibrary.h"
-#include "MyPlayerController.h"
-#include "PickupActor.h"
+#include "WomenAnimInstance.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "WomenCharacter.h"
+#include "Engine/Engine.h"
 #include "Components/SkeletalMeshComponent.h"
 
-void UWomenNativeAnimInstance::NativeInitializeAnimation()
-{
-    Super::NativeInitializeAnimation();
-
-    CurrentHoldType = EHoldItemType::None;
-    PreviousHoldType = EHoldItemType::None;
-    CurrentIdlePose = nullptr;
-    CurrentLocomotionState = EWomenNativeLocomotionState::Idle;
-    PreviousLocomotionState = EWomenNativeLocomotionState::Idle;
-    bWasStandThrowing = false;
-    bWasSquatThrowing = false;
-    bWasInAir = false;
-    bWasSquat = false;
-    bPendingCrouchEnter = false;
-    bPendingCrouchExit = false;
-    JumpStartTimeRemaining = 0.f;
-    SmoothedLookRotation = FRotator::ZeroRotator;
-    bAnimationTransitionLocked = false;
-    AnimationLockTimeRemaining = 0.f;
-    bOneShotActionLocked = false;
-    OneShotActionLockTimeRemaining = 0.f;
-
-    // 默认策略示例：
-    // Idle / Walk / Run / FallLoop / Crouch 动作都是循环状态，必须可以随时被打断。
-    // JumpStart 是跳跃起手，通常不希望刚播放一帧就被 FallLoop 或 Walk 打断，所以默认 MustFinish。
-    IdleAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
-    WalkAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
-    RunAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
-    FallLoopAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
-    CrouchIdleAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
-    CrouchWalkAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
-    JumpStartAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::MustFinish;
-    CrouchEnterAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::MustFinish;
-    CrouchExitAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::MustFinish;
-
-    if (JumpStartAnimation.LockDuration <= 0.f)
-    {
-        JumpStartAnimation.LockDuration = JumpStartDuration;
-    }
-
-    PreviousLocomotionState = EWomenNativeLocomotionState::Run; // 随便给一个非Idle的值
-
-    // InitializeDefaultLookBoneRotations();
-}
-
-void UWomenNativeAnimInstance::InitializeDefaultLookBoneRotations()
-{
-    if (LookBoneRotations.Num() > 0)
-    {
-        return;
-    }
-
-    // 固定骨骼链（你当前项目用的）
-    const TArray<FName> LookBoneNames = {
-        TEXT("Spine"),
-        TEXT("Spine1"),
-        TEXT("Spine2"),
-        TEXT("Neck"),
-        TEXT("Head")
-    };
-
-    const float PitchWeights[] = { 0.2f, 0.25f, 0.35f, 0.1f, 0.1f };
-
-    for (int32 Index = 0; Index < LookBoneNames.Num(); ++Index)
-    {
-        // 可选：防御（避免骨骼缺失崩溃）
-        if (!HasSkeletonBone(LookBoneNames[Index]))
-        {
-            continue;
-        }
-
-        FNativeLookBoneRotation LookBoneRotation;
-        LookBoneRotation.BoneName = LookBoneNames[Index];
-        LookBoneRotation.PitchWeight = PitchWeights[Index];
-
-        LookBoneRotations.Add(LookBoneRotation);
-    }
-}
-
-
-bool UWomenNativeAnimInstance::HasSkeletonBone(FName BoneName) const
-{
-    const USkeletalMeshComponent* MeshComponent = GetSkelMeshComponent();
-    return MeshComponent && MeshComponent->GetBoneIndex(BoneName) != INDEX_NONE;
-}
-
-void UWomenNativeAnimInstance::NativeUpdateAnimation(float DeltaTime)
+void UWomenAnimInstance::NativeUpdateAnimation(float DeltaTime)
 {
     Super::NativeUpdateAnimation(DeltaTime);
-    APawn* Pawn = TryGetPawnOwner();
-    if (!Pawn) return;
-    Speed = Pawn->GetVelocity().Size2D();
-    UpdateOneShotActionLock(DeltaTime);
-    UpdateNativeLookBoneRotations(DeltaTime);
-    UpdateLocomotionState(DeltaTime);
-    UpdateHoldTypeFromOwner();
-    HandleHoldTypeChanged();
-    HandleThrowMontageState();
-}
 
-void UWomenNativeAnimInstance::UpdateOneShotActionLock(float DeltaTime)
-{
-    if (OneShotActionLockTimeRemaining > 0.f)
+    // 动画实例每帧都从当前 Pawn 拉取最新状态；拿不到 Pawn 时直接退出。
+    ACharacter* Character = Cast<ACharacter>(TryGetPawnOwner());
+    if (!Character) return;
+
+    // 只统计平面速度，忽略跳跃/下落带来的 Z 速度，避免空中时跑步值异常增大。
+    Speed = Character->GetVelocity().Size2D();
+    AWomenCharacter* WomenChar = Cast<AWomenCharacter>(Character);
+    if (WomenChar)
     {
-        OneShotActionLockTimeRemaining = FMath::Max(0.f, OneShotActionLockTimeRemaining - DeltaTime);
+        bIsSquat = WomenChar->IsSquat;
+        bIsSprint = WomenChar->IsSprint;
+        bIsSquatThrowing = WomenChar->IsSquatThrowing;
+        bIsStandThrowing = WomenChar->IsStandThrowing;
     }
 
-    if (OneShotActionLockTimeRemaining <= 0.f)
-    {
-        bOneShotActionLocked = false;
-    }
-}
 
-void UWomenNativeAnimInstance::UpdateNativeLookBoneRotations(float DeltaTime)
-{
-    const USkeletalMeshComponent* MeshComponent = GetSkelMeshComponent();
-    if (MeshComponent && MeshComponent->GetFName() == TEXT("FirstPersonLowerBodyMesh"))
+    // 读取控制器朝向，把视角旋转同步给动画蓝图做瞄准偏移。
+    AController* Controller = Character->GetController();
+    if (Controller)
     {
-        SmoothedLookRotation = FRotator::ZeroRotator;
-        Pitch = 0.f;
-        Yaw = 0.f;
-        Roll = 0.f;
+        FRotator ControlRot = Controller->GetControlRotation();
 
-        for (FNativeLookBoneRotation& LookBoneRotation : LookBoneRotations)
+        // 把 Pitch 规整到更适合动画使用的区间，并按当前蓝图需求取反。
+        Pitch = ControlRot.Pitch;
+        if (Pitch > 180.f) Pitch -= 360.f;
+        Pitch = -Pitch;
+
+        // 第一人称下半身需要腿部继续播放走/跑/蹲动画，
+        // 但胸腹/腰部以上不要跟着相机 Pitch 弯到镜头里。
+        // 如果该 Mesh 使用的是 UWomenAnimInstance 动画蓝图，这里直接把 Pitch 归零。
+        if (const USkeletalMeshComponent* MeshComponent = GetSkelMeshComponent())
         {
-            LookBoneRotation.ComputedRotation = FRotator::ZeroRotator;
-        }
-
-        return;
-    }
-    
-    if (!bEnableNativeLookBoneCalculation)
-    {
-        return;
-    }
-
-    const FRotator TargetLookRotation = CalculateControlRotationDelta();
-    if (LookRotationInterpSpeed <= 0.f)
-    {
-        SmoothedLookRotation = TargetLookRotation;
-    }
-    else
-    {
-        SmoothedLookRotation = FMath::RInterpTo(
-            SmoothedLookRotation,
-            TargetLookRotation,
-            DeltaTime,
-            LookRotationInterpSpeed);
-    }
-
-    Pitch = SmoothedLookRotation.Pitch;
-    Yaw = SmoothedLookRotation.Yaw;
-    Roll = SmoothedLookRotation.Roll;
-
-    for (FNativeLookBoneRotation& LookBoneRotation : LookBoneRotations)
-    {
-        LookBoneRotation.ComputedRotation = FRotator{
-            SmoothedLookRotation.Pitch * LookBoneRotation.PitchWeight,
-            SmoothedLookRotation.Yaw * LookBoneRotation.YawWeight,
-            SmoothedLookRotation.Roll * LookBoneRotation.RollWeight
-        };
-    }
-}
-
-
-FRotator UWomenNativeAnimInstance::CalculateControlRotationDelta() const
-{
-    const APawn* PawnOwner = TryGetPawnOwner();
-    if (!PawnOwner)
-    {
-        return FRotator::ZeroRotator;
-    }
-
-    const FRotator ControlRotation = PawnOwner->GetControlRotation();
-    const FRotator ActorRotation = PawnOwner->GetActorRotation();
-    FRotator DeltaRotation = UKismetMathLibrary::NormalizedDeltaRotator(ControlRotation, ActorRotation);
-
-    DeltaRotation.Pitch = FMath::Clamp(DeltaRotation.Pitch, MaxLookDownPitch, MaxLookUpPitch);
-    DeltaRotation.Yaw = FMath::Clamp(DeltaRotation.Yaw, -MaxLookYaw, MaxLookYaw);
-    DeltaRotation.Roll = 0.f;
-
-    return DeltaRotation;
-}
-
-void UWomenNativeAnimInstance::UpdateLocomotionState(float DeltaTime)
-{
-    // 动作锁倒计时。
-    // 例如 JumpStart 设置 MustFinish 后，会在这里等待它播放完。
-    // 期间即使 ResolveLocomotionState() 检测到已经应该进入 FallLoop，也不会立刻切换。
-    if (AnimationLockTimeRemaining > 0.f)
-    {
-        AnimationLockTimeRemaining = FMath::Max(0.f, AnimationLockTimeRemaining - DeltaTime);
-    }
-
-    if (AnimationLockTimeRemaining <= 0.f)
-    {
-        bAnimationTransitionLocked = false;
-    }
-
-    if (bIsInAir && !bWasInAir)
-    {
-        JumpStartTimeRemaining = JumpStartDuration;
-    }
-
-    // 检测蹲下状态变化：
-    // false -> true: 先进入 CrouchEnter 过渡动作。
-    // true -> false: 先进入 CrouchExit 过渡动作。
-    // 这两个过渡动作默认进入 CrouchIdle/Idle 等结果状态。
-    if (bIsSquat && !bWasSquat)
-    {
-        bPendingCrouchEnter = true;
-        bPendingCrouchExit = false;
-    }
-    else if (!bIsSquat && bWasSquat)
-    {
-        bPendingCrouchExit = true;
-        bPendingCrouchEnter = false;
-    }
-
-    if (JumpStartTimeRemaining > 0.f)
-    {
-        JumpStartTimeRemaining = FMath::Max(0.f, JumpStartTimeRemaining - DeltaTime);
-    }
-
-    CurrentLocomotionState = ResolveLocomotionState();
-    HandleLocomotionStateChanged();
-
-    bWasInAir = bIsInAir;
-    bWasSquat = bIsSquat;
-}
-
-EWomenNativeLocomotionState UWomenNativeAnimInstance::ResolveLocomotionState() const
-{
-    if (bIsInAir)
-    {
-        return JumpStartTimeRemaining > 0.f
-            ? EWomenNativeLocomotionState::JumpStart
-            : EWomenNativeLocomotionState::FallLoop;
-    }
-
-    if (bPendingCrouchEnter)
-    {
-        return EWomenNativeLocomotionState::CrouchEnter;
-    }
-
-    if (bPendingCrouchExit)
-    {
-        return EWomenNativeLocomotionState::CrouchExit;
-    }
-
-    const bool bMoving = Speed > MoveSpeedThreshold;
-
-    if (bIsSquat)
-    {
-        return bMoving
-            ? EWomenNativeLocomotionState::CrouchWalk
-            : EWomenNativeLocomotionState::CrouchIdle;
-    }
-
-    if (!bMoving)
-    {
-        return EWomenNativeLocomotionState::Idle;
-    }
-
-    return bIsSprint
-        ? EWomenNativeLocomotionState::Run
-        : EWomenNativeLocomotionState::Walk;
-}
-
-void UWomenNativeAnimInstance::HandleLocomotionStateChanged()
-{
-    if (CurrentLocomotionState == PreviousLocomotionState)
-    {
-        return;
-    }
-
-    // 这里就是“动作能不能被打断”的核心。
-    // 例如：
-    // - Walk / Run 是 Interruptible，任何时候都能被 Idle, Jump, Crouch 打断。
-    // - JumpStart 是 MustFinish，在锁时间结束前，不允许 FallLoop/Walk/Run 抢走播放权。
-    if (!CanInterruptCurrentLocomotion(CurrentLocomotionState))
-    {
-        return;
-    }
-
-    PlayLocomotionAnimation(CurrentLocomotionState);
-    PreviousLocomotionState = CurrentLocomotionState;
-}
-
-const FNativeLocomotionAnimationSet* UWomenNativeAnimInstance::GetAnimationSetForLocomotionState(EWomenNativeLocomotionState LocomotionState) const
-{
-    switch (LocomotionState)
-    {
-        case EWomenNativeLocomotionState::Idle: return &IdleAnimation;
-        case EWomenNativeLocomotionState::Walk: return &WalkAnimation;
-        case EWomenNativeLocomotionState::Run: return &RunAnimation;
-        case EWomenNativeLocomotionState::JumpStart: return &JumpStartAnimation;
-        case EWomenNativeLocomotionState::FallLoop: return &FallLoopAnimation;
-        case EWomenNativeLocomotionState::CrouchEnter: return &CrouchEnterAnimation;
-        case EWomenNativeLocomotionState::CrouchExit: return &CrouchExitAnimation;
-        case EWomenNativeLocomotionState::CrouchIdle: return &CrouchIdleAnimation;
-        case EWomenNativeLocomotionState::CrouchWalk: return &CrouchWalkAnimation;
-        default: return nullptr;
-    }
-}
-
-bool UWomenNativeAnimInstance::PlayLocomotionAnimation(EWomenNativeLocomotionState LocomotionState)
-{
-    const FNativeLocomotionAnimationSet* AnimationSet = GetAnimationSetForLocomotionState(LocomotionState);
-    UAnimSequenceBase* Animation = AnimationSet ? AnimationSet->Animation : nullptr;
-    if (!Animation || LocomotionSlotName.IsNone())
-    {
-        return false;
-    }
-
-    const bool bLoop = LocomotionState != EWomenNativeLocomotionState::JumpStart
-        && LocomotionState != EWomenNativeLocomotionState::CrouchEnter
-        && LocomotionState != EWomenNativeLocomotionState::CrouchExit;
-    PlaySlotAnimationAsDynamicMontage(
-        Animation,
-        LocomotionSlotName,
-        LocomotionBlendInTime,
-        LocomotionBlendOutTime,
-        1.f,
-        bLoop ? MAX_int32 : 1);
-
-    StartAnimationLockIfNeeded(*AnimationSet);
-
-    if (LocomotionState == EWomenNativeLocomotionState::CrouchEnter)
-    {
-        bPendingCrouchEnter = false;
-    }
-    else if (LocomotionState == EWomenNativeLocomotionState::CrouchExit)
-    {
-        bPendingCrouchExit = false;
-    }
-
-    return true;
-}
-
-bool UWomenNativeAnimInstance::CanInterruptCurrentLocomotion(EWomenNativeLocomotionState RequestedState) const
-{
-    if (!bAnimationTransitionLocked)
-    {
-        return true;
-    }
-
-    // 这里留一个“强制优先级”入口。
-    // 如果后面有受击、死亡、被抓等更高优先级动作，可以在这里允许它们无视锁直接打断。
-    // 现在的基础移动状态里，没有比 JumpStart 更高优先级的状态，所以锁住时直接拒绝绝切换。
-    return false;
-}
-
-void UWomenNativeAnimInstance::StartAnimationLockIfNeeded(const FNativeLocomotionAnimationSet& AnimationSet)
-{
-    if (AnimationSet.InterruptPolicy != EWomenNativeAnimationInterruptPolicy::MustFinish)
-    {
-        bAnimationTransitionLocked = false;
-        AnimationLockTimeRemaining = 0.f;
-        return;
-    }
-
-    float LockDuration = AnimationSet.LockDuration;
-    if (LockDuration <= 0.f && AnimationSet.Animation)
-    {
-        LockDuration = AnimationSet.Animation->GetPlayLength();
-    }
-
-    bAnimationTransitionLocked = LockDuration > 0.f;
-    AnimationLockTimeRemaining = FMath::Max(0.f, LockDuration);
-}
-
-void UWomenNativeAnimInstance::UpdateHoldTypeFromOwner()
-{
-    EHoldItemType NewHoldType = EHoldItemType::None;
-
-    APawn* PawnOwner = TryGetPawnOwner();
-    if (!PawnOwner)
-    {
-        CurrentHoldType = NewHoldType;
-        return;
-    }
-
-    if (AMyPlayerController* PlayerController = Cast<AMyPlayerController>(PawnOwner->GetController()))
-    {
-        if (APickupActor* HeldActor = PlayerController->GetHeldActor())
-        {
-            NewHoldType = HeldActor->GetHoldType();
-        }
-    }
-
-    if (NewHoldType == EHoldItemType::None)
-    {
-        TArray<AActor*> AttachedActors;
-        PawnOwner->GetAttachedActors(AttachedActors);
-
-        for (AActor* AttachedActor : AttachedActors)
-        {
-            APickupActor* PickupActor = Cast<APickupActor>(AttachedActor);
-            if (PickupActor && PickupActor->IsHeldByPlayer())
+            if (MeshComponent->GetFName() == TEXT("FirstPersonLowerBodyMesh"))
             {
-                NewHoldType = PickupActor->GetHoldType();
-                break;
+                Pitch = 0.f;
             }
         }
+
+
     }
 
-    CurrentHoldType = NewHoldType;
-}
 
-void UWomenNativeAnimInstance::HandleHoldTypeChanged()
-{
-    if (CurrentHoldType == PreviousHoldType)
+    // 空中状态直接读取 CharacterMovement，供跳跃/落地状态机使用。
+    bIsInAir = Character->GetCharacterMovement()->IsFalling();
+
+    if (GEngine)
     {
-        return;
+        // 这些屏幕调试信息适合在调动画状态同步时临时观察。
+        GEngine->AddOnScreenDebugMessage(0, 0.f, FColor::Yellow, FString::Printf(TEXT("Speed: %.1f"), Speed));
+        GEngine->AddOnScreenDebugMessage(1, 0.f, FColor::Cyan, FString::Printf(TEXT("bIsSquat: %s"), bIsSquat ? TEXT("true") : TEXT("false")));
+        GEngine->AddOnScreenDebugMessage(2, 0.f, FColor::Green, FString::Printf(TEXT("bIsInAir: %s"), bIsInAir ? TEXT("true") : TEXT("false")));
+        GEngine->AddOnScreenDebugMessage(3, 0.f, FColor::Orange, FString::Printf(TEXT("bIsSquatThrowing: %s"), bIsSquatThrowing ? TEXT("true") : TEXT("false")));
+        GEngine->AddOnScreenDebugMessage(4, 0.f, FColor::Red, FString::Printf(TEXT("bIsStandThrowing: %s"), bIsStandThrowing ? TEXT("true") : TEXT("false")));
+
+        GEngine->AddOnScreenDebugMessage(5, 0.f, FColor::Yellow, FString::Printf(TEXT("Pitch: %.1f"), Pitch));
+        //GEngine->AddOnScreenDebugMessage(6, 0.f, FColor::Yellow, FString::Printf(TEXT("Roll: %.1f"), Roll));
+        //GEngine->AddOnScreenDebugMessage(7, 0.f, FColor::Yellow, FString::Printf(TEXT("Yaw: %.1f"), Yaw));
     }
-
-    const FNativeHoldAnimationSet* AnimationSet = HoldAnimations.Find(CurrentHoldType);
-    CurrentIdlePose = AnimationSet ? AnimationSet->IdlePose : nullptr;
-
-    if (CurrentHoldType != EHoldItemType::None)
-    {
-        PlayEquipMontageForHoldType(CurrentHoldType);
-    }
-
-    PreviousHoldType = CurrentHoldType;
-}
-
-void UWomenNativeAnimInstance::HandleThrowMontageState()
-{
-    // 投掷动作是“动作层”，不是“移动层”。
-    // 这里不会停止 Walk/Run。Walk/Run 继续由 LocomotionSlotName 播放。
-    // 投掷只播放到 UpperBodySlotName，然后由动画蓝图的 Layered Blend Per Bone 合并到上半身/右手。
-    if (bIsStandThrowing && !bWasStandThrowing)
-    {
-        PlayThrowAction(false);
-    }
-
-    if (bIsSquatThrowing && !bWasSquatThrowing)
-    {
-        PlayThrowAction(true);
-    }
-
-    bWasStandThrowing = bIsStandThrowing;
-    bWasSquatThrowing = bIsSquatThrowing;
-}
-
-bool UWomenNativeAnimInstance::PlayThrowAction(bool bSquatThrow)
-{
-    if (!CanPlayOneShotAction())
-    {
-        return false;
-    }
-
-    const bool bRunThrow = !bSquatThrow && IsRunningThrow();
-
-    UAnimSequenceBase* UpperBodyAnimation = nullptr;
-    if (bSquatThrow)
-    {
-        UpperBodyAnimation = SquatThrowUpperBodyAnimation.Get();
-    }
-    else if (bRunThrow)
-    {
-        UpperBodyAnimation = RunThrowUpperBodyAnimation.Get();
-    }
-    else
-    {
-        UpperBodyAnimation = StandThrowUpperBodyAnimation.Get();
-    }
-
-    if (UpperBodyAnimation)
-    {
-        return PlayOneShotAction(UpperBodyAnimation, nullptr);
-    }
-
-    UAnimMontage* ThrowMontage = nullptr;
-    if (bSquatThrow)
-    {
-        ThrowMontage = SquatThrowMontage.Get();
-    }
-    else if (bRunThrow)
-    {
-        ThrowMontage = RunThrowMontage.Get();
-    }
-    else
-    {
-        ThrowMontage = StandThrowMontage.Get();
-    }
-
-    if (!ThrowMontage)
-    {
-        return false;
-    }
-
-    return PlayOneShotAction(nullptr, ThrowMontage);
-}
-
-bool UWomenNativeAnimInstance::IsRunningThrow() const
-{
-    return CurrentLocomotionState == EWomenNativeLocomotionState::Run
-        || (bIsSprint && Speed > MoveSpeedThreshold);
-}
-
-bool UWomenNativeAnimInstance::PlayUpperBodyAnimation(UAnimSequenceBase* Animation, bool bLoop)
-{
-    if (!Animation || UpperBodySlotName.IsNone())
-    {
-        return false;
-    }
-
-    PlaySlotAnimationAsDynamicMontage(
-        Animation,
-        UpperBodySlotName,
-        UpperBodyBlendInTime,
-        UpperBodyBlendOutTime,
-        1.f,
-        bLoop ? MAX_int32 : 1);
-
-    return true;
-}
-
-bool UWomenNativeAnimInstance::PlayOpenDoorAction()
-{
-    const bool bCrouchAction = IsCrouchAction();
-    UAnimSequenceBase* UpperBodyAnimation = bCrouchAction
-        ? SquatOpenDoorUpperBodyAnimation.Get()
-        : StandOpenDoorUpperBodyAnimation.Get();
-    UAnimMontage* Montage = bCrouchAction
-        ? SquatOpenDoorMontage.Get()
-        : StandOpenDoorMontage.Get();
-
-    return PlayOneShotAction(UpperBodyAnimation, Montage);
-}
-
-bool UWomenNativeAnimInstance::PlayHitAction()
-{
-    const bool bCrouchAction = IsCrouchAction();
-    UAnimSequenceBase* UpperBodyAnimation = bCrouchAction 
-        ? SquatHitUpperBodyAnimation.Get() 
-        : StandHitUpperBodyAnimation.Get();
-    UAnimMontage* Montage = bCrouchAction 
-        ? SquatHitMontage.Get() 
-        : StandHitMontage.Get();
-
-    return PlayOneShotAction(UpperBodyAnimation, Montage);
-}
-
-bool UWomenNativeAnimInstance::IsCrouchAction() const
-{
-    return bIsSquat
-        || CurrentLocomotionState == EWomenNativeLocomotionState::CrouchEnter
-        || CurrentLocomotionState == EWomenNativeLocomotionState::CrouchIdle
-        || CurrentLocomotionState == EWomenNativeLocomotionState::CrouchWalk;
-}
-
-bool UWomenNativeAnimInstance::CanPlayOneShotAction() const
-{
-    return !bOneShotActionLocked;
-}
-
-bool UWomenNativeAnimInstance::PlayOneShotAction(UAnimSequenceBase* UpperBodyAnimation, UAnimMontage* Montage)
-{
-    if (!CanPlayOneShotAction())
-    {
-        return false;
-    }
-
-    float LockDuration = 0.f;
-    bool bPlayed = false;
-
-    if (UpperBodyAnimation && !UpperBodySlotName.IsNone())
-    {
-        PlaySlotAnimationAsDynamicMontage(
-            UpperBodyAnimation,
-            UpperBodySlotName,
-            UpperBodyBlendInTime,
-            UpperBodyBlendOutTime,
-            1.f,
-            1
-        );
-
-        LockDuration = UpperBodyAnimation->GetPlayLength();
-        bPlayed = true;
-    }
-    else if (Montage)
-    {
-        // 注意：Montage 自己的 Slot 必须设置成 UpperBody，否则它仍会按 Montage 里的 Slot 播放。
-        Montage_Play(Montage);
-        LockDuration = Montage->GetPlayLength();
-        bPlayed = true;
-    }
-
-    if (bPlayed)
-    {
-        StartOneShotActionLock(LockDuration);
-    }
-
-    return bPlayed;
-}
-
-void UWomenNativeAnimInstance::StartOneShotActionLock(float LockDuration)
-{
-    bOneShotActionLocked = LockDuration > 0.f;
-    OneShotActionLockTimeRemaining = FMath::Max(0.f, LockDuration);
-}
-
-bool UWomenNativeAnimInstance::PlayEquipMontageForHoldType(EHoldItemType HoldItemType)
-{
-    const FNativeHoldAnimationSet* AnimationSet = HoldAnimations.Find(HoldItemType);
-    if (!AnimationSet || !AnimationSet->EquipMontage)
-    {
-        return false;
-    }
-
-    Montage_Play(AnimationSet->EquipMontage);
-    return true;
-}
-
-bool UWomenNativeAnimInstance::PlayUseMontageForHoldType(EHoldItemType HoldItemType)
-{
-    const FNativeHoldAnimationSet* AnimationSet = HoldAnimations.Find(HoldItemType);
-    if (!AnimationSet || !AnimationSet->UseMontage)
-    {
-        return false;
-    }
-
-    Montage_Play(AnimationSet->UseMontage);
-    return true;
 }
