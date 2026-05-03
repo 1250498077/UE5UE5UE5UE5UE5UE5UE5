@@ -35,9 +35,9 @@ namespace
     {
         static const TArray<FName> BoneNames =
         {
-            TEXT("Spine"),
-            TEXT("Spine1"),
-            TEXT("Spine2"),
+            // TEXT("Spine"),
+            // TEXT("Spine1"),
+            // TEXT("Spine2"),
             TEXT("LeftShoulder"),
             TEXT("LeftArm"),
             TEXT("LeftForeArm"),
@@ -100,6 +100,14 @@ namespace
         if (!MeshComponent)
         {
             return;
+        }
+
+        // 先恢复所有骨骼，再按当前列表隐藏。
+        // HideBoneByName 的状态会保留；如果之前隐藏过 Spine/Spine1/Spine2，
+        // 后面即使从隐藏列表删掉，也不会自动显示回来。
+        for (int32 BoneIndex = 0; BoneIndex < MeshComponent->GetNumBones(); ++BoneIndex)
+        {
+            MeshComponent->UnHideBoneByName(MeshComponent->GetBoneName(BoneIndex));
         }
 
         for (const FName BoneName : BoneNames)
@@ -169,11 +177,17 @@ AWomenCharacter::AWomenCharacter()
 
     PrimaryActorTick.bCanEverTick = true;
 
+    FirstPersonCameraRoot = CreateDefaultSubobject<USceneComponent>(TEXT("FirstPersonCameraRoot"));
+    FirstPersonCameraRoot->SetupAttachment(GetCapsuleComponent());
+    FirstPersonCameraRoot->SetRelativeLocation(FVector(0.f, 0.f, StandingCameraHeight) + FirstPersonCameraLocationOffset);
+    FirstPersonCameraRoot->SetRelativeRotation(FirstPersonCameraRotationOffset);
+
     FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
-    FirstPersonCameraComponent->SetupAttachment(GetCapsuleComponent());
+    FirstPersonCameraComponent->SetupAttachment(FirstPersonCameraRoot);
 
 
-    FirstPersonCameraComponent->SetRelativeLocation(FVector(0.f, 0.f, 64.f));
+    FirstPersonCameraComponent->SetRelativeLocation(FVector::ZeroVector);
+    FirstPersonCameraComponent->SetRelativeRotation(FRotator::ZeroRotator);
 
     FirstPersonCameraComponent->bUsePawnControlRotation = true;
 
@@ -279,29 +293,31 @@ void AWomenCharacter::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    if (!FirstPersonCameraComponent)
+    if (!FirstPersonCameraRoot)
     {
         return;
     }
 
-    FVector CameraRelativeLocation = FirstPersonCameraComponent->GetRelativeLocation();
+    FVector CameraRelativeLocation = FirstPersonCameraLocationOffset;
     const float TargetCameraHeight = IsSquat ? CrouchingCameraHeight : StandingCameraHeight;
 
     if (CameraCrouchInterpSpeed <= 0.f)
     {
-        CameraRelativeLocation.Z = TargetCameraHeight;
+        CameraRelativeLocation.Z += TargetCameraHeight;
     }
     else
     {
+        const float CurrentCameraHeight = FirstPersonCameraRoot->GetRelativeLocation().Z - FirstPersonCameraLocationOffset.Z;
         CameraRelativeLocation.Z = FMath::FInterpTo(
-            CameraRelativeLocation.Z,
+            CurrentCameraHeight,
             TargetCameraHeight,
             DeltaTime,
             CameraCrouchInterpSpeed
-        );
+        ) + FirstPersonCameraLocationOffset.Z;
     }
 
-    FirstPersonCameraComponent->SetRelativeLocation(CameraRelativeLocation);
+    FirstPersonCameraRoot->SetRelativeLocation(CameraRelativeLocation);
+    FirstPersonCameraRoot->SetRelativeRotation(FirstPersonCameraRotationOffset);
 }
 
 void AWomenCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -368,7 +384,18 @@ void AWomenCharacter::RefreshModularMeshes()
         FirstPersonLowerBodyMesh->SetRelativeRotation(BaseMesh->GetRelativeRotation() + FirstPersonLowerBodyRotationOffset);
         FirstPersonLowerBodyMesh->SetRelativeScale3D(BaseMesh->GetRelativeScale3D());
         FirstPersonLowerBodyMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-        FirstPersonLowerBodyMesh->SetLeaderPoseComponent(BaseMesh);
+        // FirstPersonLowerBodyMesh->SetLeaderPoseComponent(BaseMesh);
+
+        // 下半身 Mesh 不使用 LeaderPose 复制主 Mesh 的完整骨骼姿态。
+        // 否则主 Mesh 的看向 Pitch 会带着胸/腹一起歪，第一人称低头时容易看到身体内部。
+        // 这里改为使用同一套 AnimBP 独立播放，并在 AnimInstance 里禁用 FirstPersonLowerBodyMesh 的 Look 骨骼旋转。
+        FirstPersonLowerBodyMesh->SetLeaderPoseComponent(nullptr);
+        if (UClass* BaseAnimClass = BaseMesh->GetAnimClass())
+        {
+            FirstPersonLowerBodyMesh->SetAnimationMode(EAnimationMode::AnimationBlueprint);
+            FirstPersonLowerBodyMesh->SetAnimInstanceClass(BaseAnimClass);
+        }
+
         HideBonesByNames(FirstPersonLowerBodyMesh, GetFirstPersonLowerMeshHiddenBoneNames());
     }
 
