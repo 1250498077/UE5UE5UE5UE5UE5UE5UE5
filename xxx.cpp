@@ -1,477 +1,639 @@
-// WomenCharacter.cpp
-#include "WomenCharacter.h"
+#include "WomenNativeAnimInstance.h"
+
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimSequenceBase.h"
+#include "GameFramework/Pawn.h"
+#include "Kismet/KismetMathLibrary.h"
+#include "MyPlayerController.h"
 #include "PickupActor.h"
-#include "Camera/CameraComponent.h"
-#include "Components/CapsuleComponent.h"
-#include "Components/SceneComponent.h"
-#include "Components/StaticMeshComponent.h"
-#include "Net/UnrealNetwork.h"
+#include "Components/SkeletalMeshComponent.h"
 
-namespace
+void UWomenNativeAnimInstance::NativeInitializeAnimation()
 {
-    static const TArray<FName>& GetFirstPersonUpperMeshHiddenBoneNames()
-    {
-        static const TArray<FName> BoneNames =
-        {
-            TEXT("LeftUpLeg"),
-            TEXT("LeftLeg"),
-            TEXT("LeftFoot"),
-            TEXT("LeftToeBase"),
-            TEXT("LeftToe_End"),
-            TEXT("RightUpLeg"),
-            TEXT("RightLeg"),
-            TEXT("RightFoot"),
-            TEXT("RightToeBase"),
-            TEXT("RightToe_End"),
-            TEXT("Neck"),
-            TEXT("Head"),
-            TEXT("HeadTop_End")
-        };
+    Super::NativeInitializeAnimation();
 
-        return BoneNames;
+    CurrentHoldType = EHoldItemType::None;
+    PreviousHoldType = EHoldItemType::None;
+    CurrentIdlePose = nullptr;
+    CurrentLocomotionState = EWomenNativeLocomotionState::Idle;
+    PreviousLocomotionState = EWomenNativeLocomotionState::Idle;
+    bWasStandThrowing = false;
+    bWasSquatThrowing = false;
+    bWasInAir = false;
+    bWasSquat = false;
+    bPendingCrouchEnter = false;
+    bPendingCrouchExit = false;
+    JumpStartTimeRemaining = 0.f;
+    SmoothedLookRotation = FRotator::ZeroRotator;
+    bAnimationTransitionLocked = false;
+    AnimationLockTimeRemaining = 0.f;
+    bOneShotActionLocked = false;
+    OneShotActionLockTimeRemaining = 0.f;
+
+    // 默认策略示例：
+    // Idle / Walk / Run / FallLoop / Crouch 动作都是循环状态，必须可以随时被打断。
+    // JumpStart 是跳跃起手，通常不希望刚播放一帧就被 FallLoop 或 Walk 打断，所以默认 MustFinish。
+    IdleAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
+    WalkAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
+    RunAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
+    FallLoopAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
+    CrouchIdleAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
+    CrouchWalkAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::Interruptible;
+    JumpStartAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::MustFinish;
+    CrouchEnterAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::MustFinish;
+    CrouchExitAnimation.InterruptPolicy = EWomenNativeAnimationInterruptPolicy::MustFinish;
+
+    if (JumpStartAnimation.LockDuration <= 0.f)
+    {
+        JumpStartAnimation.LockDuration = JumpStartDuration;
     }
 
-    static const TArray<FName>& GetFirstPersonLowerMeshHiddenBoneNames()
-    {
-        static const TArray<FName> BoneNames =
-        {
-            // TEXT("Spine"),
-            // TEXT("Spine1"),
-            // TEXT("Spine2"),
-            TEXT("LeftShoulder"),
-            TEXT("LeftArm"),
-            TEXT("LeftForeArm"),
-            TEXT("LeftHand"),
-            TEXT("LeftHandIndex1"),
-            TEXT("LeftHandIndex2"),
-            TEXT("LeftHandIndex3"),
-            TEXT("LeftHandIndex4"),
-            TEXT("LeftHandMiddle1"),
-            TEXT("LeftHandMiddle2"),
-            TEXT("LeftHandMiddle3"),
-            TEXT("LeftHandMiddle4"),
-            TEXT("LeftHandPinky1"),
-            TEXT("LeftHandPinky2"),
-            TEXT("LeftHandPinky3"),
-            TEXT("LeftHandPinky4"),
-            TEXT("LeftHandRing1"),
-            TEXT("LeftHandRing2"),
-            TEXT("LeftHandRing3"),
-            TEXT("LeftHandRing4"),
-            TEXT("LeftHandThumb1"),
-            TEXT("LeftHandThumb2"),
-            TEXT("LeftHandThumb3"),
-            TEXT("LeftHandThumb4"),
-            TEXT("RightShoulder"),
-            TEXT("RightArm"),
-            TEXT("RightForeArm"),
-            TEXT("RightHand"),
-            TEXT("RightSocket"),
-            TEXT("RightHandIndex1"),
-            TEXT("RightHandIndex2"),
-            TEXT("RightHandIndex3"),
-            TEXT("RightHandIndex4"),
-            TEXT("RightHandMiddle1"),
-            TEXT("RightHandMiddle2"),
-            TEXT("RightHandMiddle3"),
-            TEXT("RightHandMiddle4"),
-            TEXT("RightHandPinky1"),
-            TEXT("RightHandPinky2"),
-            TEXT("RightHandPinky3"),
-            TEXT("RightHandPinky4"),
-            TEXT("RightHandRing1"),
-            TEXT("RightHandRing2"),
-            TEXT("RightHandRing3"),
-            TEXT("RightHandRing4"),
-            TEXT("RightHandThumb1"),
-            TEXT("RightHandThumb2"),
-            TEXT("RightHandThumb3"),
-            TEXT("RightHandThumb4"),
-            TEXT("Neck"),
-            TEXT("Head"),
-            TEXT("HeadTop_End")
-        };
+    PreviousLocomotionState = EWomenNativeLocomotionState::Run; // 随便给一个非Idle的值
 
-        return BoneNames;
-    }
-
-    static void HideBonesByNames(USkeletalMeshComponent* MeshComponent, const TArray<FName>& BoneNames)
-    {
-        if (!MeshComponent)
-        {
-            return;
-        }
-
-        // 先恢复所有骨骼，再按当前列表隐藏。
-        // HideBoneByName 的状态会保留；如果之前隐藏过 Spine/Spine1/Spine2，
-        // 后面即使从隐藏列表删掉，也不会自动显示回来。
-        for (int32 BoneIndex = 0; BoneIndex < MeshComponent->GetNumBones(); ++BoneIndex)
-        {
-            MeshComponent->UnHideBoneByName(MeshComponent->GetBoneName(BoneIndex));
-        }
-
-        for (const FName BoneName : BoneNames)
-        {
-            if (MeshComponent->GetBoneIndex(BoneName) != INDEX_NONE)
-            {
-                MeshComponent->HideBoneByName(BoneName, EPhysBodyOp::PBO_None);
-            }
-        }
-    }
-
-    static void CopySkeletalMeshSetup(USkeletalMeshComponent* TargetMesh, USkeletalMeshComponent* SourceMesh)
-    {
-        if (!TargetMesh || !SourceMesh)
-        {
-            return;
-        }
-
-        if (USkeletalMesh* SkeletalMesh = SourceMesh->GetSkeletalMeshAsset())
-        {
-            for (int32 MaterialIndex = 0; MaterialIndex < TargetMesh->GetNumMaterials(); ++MaterialIndex)
-            {
-                TargetMesh->SetMaterial(MaterialIndex, nullptr);
-            }
-
-            TargetMesh->SetSkeletalMeshAsset(SkeletalMesh);
-
-            const int32 MaterialCount = SourceMesh->GetNumMaterials();
-            for (int32 MaterialIndex = 0; MaterialIndex < MaterialCount; ++MaterialIndex)
-            {
-                TargetMesh->SetMaterial(MaterialIndex, SourceMesh->GetMaterial(MaterialIndex));
-            }
-        }
-    }
-
-    static void ConfigureModularMeshComponent(USkeletalMeshComponent* MeshComponent, USkeletalMeshComponent* ParentMesh)
-    {
-        if (!MeshComponent || !ParentMesh)
-        {
-            return;
-        }
-
-        MeshComponent->SetupAttachment(ParentMesh);
-        MeshComponent->SetOnlyOwnerSee(false);
-        MeshComponent->SetOwnerNoSee(true);
-        MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-        MeshComponent->SetGenerateOverlapEvents(false);
-        MeshComponent->SetCastShadow(true);
-        MeshComponent->bCastDynamicShadow = true;
-        MeshComponent->bCastHiddenShadow = true;
-    }
+    // InitializeDefaultLookBoneRotations();
 }
 
-AWomenCharacter::AWomenCharacter()
+void UWomenNativeAnimInstance::InitializeDefaultLookBoneRotations()
 {
-    bReplicates = true;
-    SetReplicateMovement(true);
-
-    // Third-person full body: other players can see it,
-    // but it still casts the owner's full-body shadow.
-    GetMesh()->SetOwnerNoSee(false);
-    GetMesh()->SetHiddenInGame(false);
-    GetMesh()->SetCastShadow(true);
-    GetMesh()->bCastHiddenShadow = true;
-    GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-
-
-    PrimaryActorTick.bCanEverTick = true;
-
-    FirstPersonCameraRoot = CreateDefaultSubobject<USceneComponent>(TEXT("FirstPersonCameraRoot"));
-    FirstPersonCameraRoot->SetupAttachment(GetCapsuleComponent());
-    FirstPersonCameraRoot->SetRelativeLocation(FVector(0.f, 0.f, StandingCameraHeight) + FirstPersonCameraLocationOffset);
-    FirstPersonCameraRoot->SetRelativeRotation(FirstPersonCameraRotationOffset);
-
-    FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
-    FirstPersonCameraComponent->SetupAttachment(FirstPersonCameraRoot);
-
-
-    FirstPersonCameraComponent->SetRelativeLocation(FVector::ZeroVector);
-    FirstPersonCameraComponent->SetRelativeRotation(FRotator::ZeroRotator);
-
-    FirstPersonCameraComponent->bUsePawnControlRotation = true;
-
-    // 第一人称上半身/手臂: 挂在相机下, 跟随视角 Pitch。
-    FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonMesh"));
-    FirstPersonMesh->SetupAttachment(FirstPersonCameraComponent);
-    FirstPersonMesh->SetRelativeLocation(GetMesh()->GetRelativeLocation() + FirstPersonUpperBodyLocationOffset);
-    FirstPersonMesh->SetRelativeRotation(GetMesh()->GetRelativeRotation() + FirstPersonUpperBodyRotationOffset);
-    FirstPersonMesh->SetRelativeScale3D(GetMesh()->GetRelativeScale3D());
-    FirstPersonMesh->SetOnlyOwnerSee(true);
-    FirstPersonMesh->SetOwnerNoSee(false);
-    FirstPersonMesh->SetHiddenInGame(true);
-    FirstPersonMesh->SetCastShadow(false);
-    FirstPersonMesh->bCastDynamicShadow = false;
-    FirstPersonMesh->bCastHiddenShadow = false;
-    FirstPersonMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    FirstPersonMesh->SetGenerateOverlapEvents(false);
-
-    // 第一人称下半身: 挂在身体坐标系下, 不跟随相机 Pitch。
-    FirstPersonLowerBodyMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonLowerBodyMesh"));
-    FirstPersonLowerBodyMesh->SetupAttachment(GetCapsuleComponent());
-    FirstPersonLowerBodyMesh->SetRelativeLocation(GetMesh()->GetRelativeLocation() + FirstPersonLowerBodyLocationOffset);
-    FirstPersonLowerBodyMesh->SetRelativeRotation(GetMesh()->GetRelativeRotation() + FirstPersonLowerBodyRotationOffset);
-    FirstPersonLowerBodyMesh->SetRelativeScale3D(GetMesh()->GetRelativeScale3D());
-    FirstPersonLowerBodyMesh->SetOnlyOwnerSee(true);
-    FirstPersonLowerBodyMesh->SetOwnerNoSee(false);
-    FirstPersonLowerBodyMesh->SetHiddenInGame(true);
-    FirstPersonLowerBodyMesh->SetCastShadow(false);
-    FirstPersonLowerBodyMesh->bCastDynamicShadow = false;
-    FirstPersonLowerBodyMesh->bCastHiddenShadow = false;
-    FirstPersonLowerBodyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    FirstPersonLowerBodyMesh->SetGenerateOverlapEvents(false);
-    FirstPersonLowerBodyMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-
-    ThirdPersonHeldItemDebugMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("ThirdPersonHeldItemDebugMesh"));
-    ThirdPersonHeldItemDebugMesh->SetupAttachment(GetMesh());
-    ThirdPersonHeldItemDebugMesh->SetOnlyOwnerSee(true);
-    ThirdPersonHeldItemDebugMesh->SetOwnerNoSee(false);
-    ThirdPersonHeldItemDebugMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    ThirdPersonHeldItemDebugMesh->SetGenerateOverlapEvents(false);
-    ThirdPersonHeldItemDebugMesh->SetCastShadow(false);
-    ThirdPersonHeldItemDebugMesh->bCastDynamicShadow = false;
-    ThirdPersonHeldItemDebugMesh->bCastHiddenShadow = false;
-    ThirdPersonHeldItemDebugMesh->SetHiddenInGame(true);
-
-    HeadMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("HeadMesh"));
-    ConfigureModularMeshComponent(HeadMesh, GetMesh());
-
-    HairMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("HairMesh"));
-    ConfigureModularMeshComponent(HairMesh, GetMesh());
-
-    TopMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("Topmesh"));
-    ConfigureModularMeshComponent(TopMesh, GetMesh());
-
-    HandMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("HandMesh"));
-    ConfigureModularMeshComponent(HandMesh, GetMesh());
-
-    PantsMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("PantsMesh"));
-    ConfigureModularMeshComponent(PantsMesh, GetMesh());
-
-    ShoesMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("ShoesMesh"));
-    ConfigureModularMeshComponent(ShoesMesh, GetMesh());
-
-    HoldPoint = CreateDefaultSubobject<USceneComponent>(TEXT("HoldPoint"));
-    HoldPoint->SetupAttachment(FirstPersonCameraComponent);
-
-    HoldPoint->SetRelativeLocation(FVector(80.f, 20.f, -15.f));
-}
-
-void AWomenCharacter::OnConstruction(const FTransform& Transform)
-{
-    Super::OnConstruction(Transform);
-
-    RefreshModularMeshes();
-}
-
-
-void AWomenCharacter::TeleportToLocation(FVector NewLocation, FRotator NewRotation)
-{
-    SetActorLocation(NewLocation);
-    SetActorRotation(NewRotation);
-
-}
-
-void AWomenCharacter::TeleportToTarget(AActor* TargetActor)
-{
-    if (TargetActor)
-    {
-        FVector TargetLocation = TargetActor->GetActorLocation();
-        FRotator TargetRotation = TargetActor->GetActorRotation();
-        TeleportTo(TargetLocation, TargetRotation);
-    }
-}
-
-void AWomenCharacter::BeginPlay()
-{
-    Super::BeginPlay();
-
-    RefreshModularMeshes();
-}
-
-void AWomenCharacter::Tick(float DeltaTime)
-{
-    Super::Tick(DeltaTime);
-
-    if (!FirstPersonCameraRoot)
+    if (LookBoneRotations.Num() > 0)
     {
         return;
     }
 
-    FVector CameraRelativeLocation = FirstPersonCameraLocationOffset;
-    const float TargetCameraHeight = IsSquat ? CrouchingCameraHeight : StandingCameraHeight;
-
-    if (CameraCrouchInterpSpeed <= 0.f)
-    {
-        CameraRelativeLocation.Z += TargetCameraHeight;
-    }
-    else
-    {
-        const float CurrentCameraHeight = FirstPersonCameraRoot->GetRelativeLocation().Z - FirstPersonCameraLocationOffset.Z;
-        CameraRelativeLocation.Z = FMath::FInterpTo(
-            CurrentCameraHeight,
-            TargetCameraHeight,
-            DeltaTime,
-            CameraCrouchInterpSpeed
-        ) + FirstPersonCameraLocationOffset.Z;
-    }
-
-    FirstPersonCameraRoot->SetRelativeLocation(CameraRelativeLocation);
-    FirstPersonCameraRoot->SetRelativeRotation(FirstPersonCameraRotationOffset);
-}
-
-void AWomenCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
-{
-    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-
-    DOREPLIFETIME(AWomenCharacter, IsSquat);
-    DOREPLIFETIME(AWomenCharacter, IsSprint);
-    DOREPLIFETIME(AWomenCharacter, IsSquatThrowing);
-    DOREPLIFETIME(AWomenCharacter, IsStandThrowing);
-    DOREPLIFETIME(AWomenCharacter, IsMiddleHandleTime);
-}
-
-void AWomenCharacter::RefreshModularMeshes()
-{
-    USkeletalMeshComponent* BaseMesh = GetMesh();
-    if (!BaseMesh)
-    {
-        return;
-    }
-
-    BaseMesh->SetOnlyOwnerSee(false);
-    BaseMesh->SetOwnerNoSee(false);
-    BaseMesh->SetHiddenInGame(false);
-    BaseMesh->SetCastShadow(true);
-    BaseMesh->bCastDynamicShadow = true;
-    BaseMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-
-    if (FirstPersonMesh)
-    {
-        FirstPersonMesh->SetOnlyOwnerSee(true);
-        FirstPersonMesh->SetOwnerNoSee(false);
-        FirstPersonMesh->SetHiddenInGame(false);
-
-        if (!FirstPersonMesh->GetSkeletalMeshAsset())
-        {
-            CopySkeletalMeshSetup(FirstPersonMesh, BaseMesh);
-        }
-
-        FirstPersonMesh->SetRelativeLocation(BaseMesh->GetRelativeLocation() + FirstPersonUpperBodyLocationOffset);
-        FirstPersonMesh->SetRelativeRotation(BaseMesh->GetRelativeRotation() + FirstPersonUpperBodyRotationOffset);
-        FirstPersonMesh->SetRelativeScale3D(BaseMesh->GetRelativeScale3D());
-        HideBonesByNames(FirstPersonMesh, GetFirstPersonUpperMeshHiddenBoneNames());
-    }
-
-    if (FirstPersonLowerBodyMesh)
-    {
-        if (!FirstPersonLowerBodyMesh->GetSkeletalMeshAsset())
-        {
-            if (FirstPersonMesh && FirstPersonMesh->GetSkeletalMeshAsset())
-            {
-                CopySkeletalMeshSetup(FirstPersonLowerBodyMesh, FirstPersonMesh);
-            }
-            else
-            {
-                CopySkeletalMeshSetup(FirstPersonLowerBodyMesh, BaseMesh);
-            }
-        }
-
-        FirstPersonLowerBodyMesh->SetOnlyOwnerSee(true);
-        FirstPersonLowerBodyMesh->SetOwnerNoSee(false);
-        FirstPersonLowerBodyMesh->SetHiddenInGame(false);
-        FirstPersonLowerBodyMesh->SetRelativeLocation(BaseMesh->GetRelativeLocation() + FirstPersonLowerBodyLocationOffset);
-        FirstPersonLowerBodyMesh->SetRelativeRotation(BaseMesh->GetRelativeRotation() + FirstPersonLowerBodyRotationOffset);
-        FirstPersonLowerBodyMesh->SetRelativeScale3D(BaseMesh->GetRelativeScale3D());
-        FirstPersonLowerBodyMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-        // FirstPersonLowerBodyMesh->SetLeaderPoseComponent(BaseMesh);
-
-        // 下半身 Mesh 不使用 LeaderPose 复制主 Mesh 的完整骨骼姿态。
-        // 否则主 Mesh 的看向 Pitch 会带着胸/腹一起歪，第一人称低头时容易看到身体内部。
-        // 这里改为使用同一套 AnimBP 独立播放，并在 AnimInstance 里禁用 FirstPersonLowerBodyMesh 的 Look 骨骼旋转。
-        FirstPersonLowerBodyMesh->SetLeaderPoseComponent(nullptr);
-        if (UClass* BaseAnimClass = BaseMesh->GetAnimClass())
-        {
-            FirstPersonLowerBodyMesh->SetAnimationMode(EAnimationMode::AnimationBlueprint);
-            FirstPersonLowerBodyMesh->SetAnimInstanceClass(BaseAnimClass);
-        }
-
-        HideBonesByNames(FirstPersonLowerBodyMesh, GetFirstPersonLowerMeshHiddenBoneNames());
-    }
-
-    TArray<USkeletalMeshComponent*> ModularMeshes =
-    {
-        HeadMesh,
-        HairMesh,
-        TopMesh,
-        PantsMesh,
-        ShoesMesh,
-        HandMesh
+    // 固定骨骼链（你当前项目用的）
+    const TArray<FName> LookBoneNames = {
+        TEXT("Spine"),
+        TEXT("Spine1"),
+        TEXT("Spine2"),
+        TEXT("Neck"),
+        TEXT("Head")
     };
 
-    for (USkeletalMeshComponent* ModularMesh : ModularMeshes)
+    const float PitchWeights[] = { 0.2f, 0.25f, 0.35f, 0.1f, 0.1f };
+
+    for (int32 Index = 0; Index < LookBoneNames.Num(); ++Index)
     {
-        if (!ModularMesh)
+        // 可选：防御（避免骨骼缺失崩溃）
+        if (!HasSkeletonBone(LookBoneNames[Index]))
         {
             continue;
         }
 
-        ModularMesh->SetOnlyOwnerSee(false);
-        ModularMesh->SetOwnerNoSee(false); 
-        ModularMesh->SetHiddenInGame(false);
-        ModularMesh->SetLeaderPoseComponent(BaseMesh);
-        ModularMesh->SetRelativeLocation(FVector::ZeroVector);
-        ModularMesh->SetRelativeRotation(FRotator::ZeroRotator);
-        ModularMesh->SetRelativeScale3D(FVector::OneVector);
+        FNativeLookBoneRotation LookBoneRotation;
+        LookBoneRotation.BoneName = LookBoneNames[Index];
+        LookBoneRotation.PitchWeight = PitchWeights[Index];
+
+        LookBoneRotations.Add(LookBoneRotation);
     }
 }
 
-void AWomenCharacter::RebuildModularMeshes()
+
+bool UWomenNativeAnimInstance::HasSkeletonBone(FName BoneName) const
 {
-    RefreshModularMeshes();
+    const USkeletalMeshComponent* MeshComponent = GetSkelMeshComponent();
+    return MeshComponent && MeshComponent->GetBoneIndex(BoneName) != INDEX_NONE;
 }
 
-void AWomenCharacter::ShowHeldItemThirdPersonDebugMesh(APickupActor* PickupActor)
+void UWomenNativeAnimInstance::NativeUpdateAnimation(float DeltaTime)
 {
-    if (!ThirdPersonHeldItemDebugMesh || !PickupActor || !GetMesh())
+    Super::NativeUpdateAnimation(DeltaTime);
+    APawn* Pawn = TryGetPawnOwner();
+    if (!Pawn) return;
+    Speed = Pawn->GetVelocity().Size2D();
+    UpdateOneShotActionLock(DeltaTime);
+    UpdateNativeLookBoneRotations(DeltaTime);
+    UpdateLocomotionState(DeltaTime);
+    UpdateHoldTypeFromOwner();
+    HandleHoldTypeChanged();
+    HandleThrowMontageState();
+}
+
+void UWomenNativeAnimInstance::UpdateOneShotActionLock(float DeltaTime)
+{
+    if (OneShotActionLockTimeRemaining > 0.f)
+    {
+        OneShotActionLockTimeRemaining = FMath::Max(0.f, OneShotActionLockTimeRemaining - DeltaTime);
+    }
+
+    if (OneShotActionLockTimeRemaining <= 0.f)
+    {
+        bOneShotActionLocked = false;
+    }
+}
+
+void UWomenNativeAnimInstance::UpdateNativeLookBoneRotations(float DeltaTime)
+{
+    const USkeletalMeshComponent* MeshComponent = GetSkelMeshComponent();
+    if (MeshComponent && MeshComponent->GetFName() == TEXT("FirstPersonLowerBodyMesh"))
+    {
+        SmoothedLookRotation = FRotator::ZeroRotator;
+        Pitch = 0.f;
+        Yaw = 0.f;
+        Roll = 0.f;
+
+        for (FNativeLookBoneRotation& LookBoneRotation : LookBoneRotations)
+        {
+            LookBoneRotation.ComputedRotation = FRotator::ZeroRotator;
+        }
+
+        return;
+    }
+    
+    if (!bEnableNativeLookBoneCalculation)
     {
         return;
     }
 
-    UStaticMeshComponent* PickupMeshComponent = PickupActor->GetPickupMeshComponent();
-    if (!PickupMeshComponent)
+    const FRotator TargetLookRotation = CalculateControlRotationDelta();
+    if (LookRotationInterpSpeed <= 0.f)
     {
-        HideHeldItemThirdPersonDebugMesh();
-        return;
+        SmoothedLookRotation = TargetLookRotation;
+    }
+    else
+    {
+        SmoothedLookRotation = FMath::RInterpTo(
+            SmoothedLookRotation,
+            TargetLookRotation,
+            DeltaTime,
+            LookRotationInterpSpeed);
     }
 
-    ThirdPersonHeldItemDebugMesh->SetStaticMesh(PickupMeshComponent->GetStaticMesh());
-    ThirdPersonHeldItemDebugMesh->EmptyOverrideMaterials();
+    Pitch = SmoothedLookRotation.Pitch;
+    Yaw = SmoothedLookRotation.Yaw;
+    Roll = SmoothedLookRotation.Roll;
 
-    const int32 MaterialCount = PickupMeshComponent->GetNumMaterials();
-    for (int32 MaterialIndex = 0; MaterialIndex < MaterialCount; ++MaterialIndex)
+    for (FNativeLookBoneRotation& LookBoneRotation : LookBoneRotations)
     {
-        ThirdPersonHeldItemDebugMesh->SetMaterial(MaterialIndex, PickupMeshComponent->GetMaterial(MaterialIndex));
+        LookBoneRotation.ComputedRotation = FRotator{
+            SmoothedLookRotation.Pitch * LookBoneRotation.PitchWeight,
+            SmoothedLookRotation.Yaw * LookBoneRotation.YawWeight,
+            SmoothedLookRotation.Roll * LookBoneRotation.RollWeight
+        };
     }
-
-    ThirdPersonHeldItemDebugMesh->AttachToComponent(
-        GetMesh(),
-        FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-        PickupActor->GetThirdPersonSocketName());
-    ThirdPersonHeldItemDebugMesh->SetRelativeLocation(PickupActor->GetThirdPersonLocationOffset());
-    ThirdPersonHeldItemDebugMesh->SetRelativeRotation(PickupActor->GetThirdPersonRotationOffset());
-    ThirdPersonHeldItemDebugMesh->SetRelativeScale3D(PickupMeshComponent->GetRelativeScale3D());
-    ThirdPersonHeldItemDebugMesh->SetHiddenInGame(false);
 }
 
-void AWomenCharacter::HideHeldItemThirdPersonDebugMesh()
+
+FRotator UWomenNativeAnimInstance::CalculateControlRotationDelta() const
 {
-    if (!ThirdPersonHeldItemDebugMesh)
+    const APawn* PawnOwner = TryGetPawnOwner();
+    if (!PawnOwner)
+    {
+        return FRotator::ZeroRotator;
+    }
+
+    const FRotator ControlRotation = PawnOwner->GetControlRotation();
+    const FRotator ActorRotation = PawnOwner->GetActorRotation();
+    FRotator DeltaRotation = UKismetMathLibrary::NormalizedDeltaRotator(ControlRotation, ActorRotation);
+
+    DeltaRotation.Pitch = FMath::Clamp(DeltaRotation.Pitch, MaxLookDownPitch, MaxLookUpPitch);
+    DeltaRotation.Yaw = FMath::Clamp(DeltaRotation.Yaw, -MaxLookYaw, MaxLookYaw);
+    DeltaRotation.Roll = 0.f;
+
+    return DeltaRotation;
+}
+
+void UWomenNativeAnimInstance::UpdateLocomotionState(float DeltaTime)
+{
+    // 动作锁倒计时。
+    // 例如 JumpStart 设置 MustFinish 后，会在这里等待它播放完。
+    // 期间即使 ResolveLocomotionState() 检测到已经应该进入 FallLoop，也不会立刻切换。
+    if (AnimationLockTimeRemaining > 0.f)
+    {
+        AnimationLockTimeRemaining = FMath::Max(0.f, AnimationLockTimeRemaining - DeltaTime);
+    }
+
+    if (AnimationLockTimeRemaining <= 0.f)
+    {
+        bAnimationTransitionLocked = false;
+    }
+
+    if (bIsInAir && !bWasInAir)
+    {
+        JumpStartTimeRemaining = JumpStartDuration;
+    }
+
+    // 检测蹲下状态变化：
+    // false -> true: 先进入 CrouchEnter 过渡动作。
+    // true -> false: 先进入 CrouchExit 过渡动作。
+    // 这两个过渡动作默认进入 CrouchIdle/Idle 等结果状态。
+    if (bIsSquat && !bWasSquat)
+    {
+        bPendingCrouchEnter = true;
+        bPendingCrouchExit = false;
+    }
+    else if (!bIsSquat && bWasSquat)
+    {
+        bPendingCrouchExit = true;
+        bPendingCrouchEnter = false;
+    }
+
+    if (JumpStartTimeRemaining > 0.f)
+    {
+        JumpStartTimeRemaining = FMath::Max(0.f, JumpStartTimeRemaining - DeltaTime);
+    }
+
+    CurrentLocomotionState = ResolveLocomotionState();
+    HandleLocomotionStateChanged();
+
+    bWasInAir = bIsInAir;
+    bWasSquat = bIsSquat;
+}
+
+EWomenNativeLocomotionState UWomenNativeAnimInstance::ResolveLocomotionState() const
+{
+    if (bIsInAir)
+    {
+        return JumpStartTimeRemaining > 0.f
+            ? EWomenNativeLocomotionState::JumpStart
+            : EWomenNativeLocomotionState::FallLoop;
+    }
+
+    if (bPendingCrouchEnter)
+    {
+        return EWomenNativeLocomotionState::CrouchEnter;
+    }
+
+    if (bPendingCrouchExit)
+    {
+        return EWomenNativeLocomotionState::CrouchExit;
+    }
+
+    const bool bMoving = Speed > MoveSpeedThreshold;
+
+    if (bIsSquat)
+    {
+        return bMoving
+            ? EWomenNativeLocomotionState::CrouchWalk
+            : EWomenNativeLocomotionState::CrouchIdle;
+    }
+
+    if (!bMoving)
+    {
+        return EWomenNativeLocomotionState::Idle;
+    }
+
+    return bIsSprint
+        ? EWomenNativeLocomotionState::Run
+        : EWomenNativeLocomotionState::Walk;
+}
+
+void UWomenNativeAnimInstance::HandleLocomotionStateChanged()
+{
+    if (CurrentLocomotionState == PreviousLocomotionState)
     {
         return;
     }
 
-    ThirdPersonHeldItemDebugMesh->SetStaticMesh(nullptr);
-    ThirdPersonHeldItemDebugMesh->EmptyOverrideMaterials();
-    ThirdPersonHeldItemDebugMesh->SetHiddenInGame(true);
+    // 这里就是“动作能不能被打断”的核心。
+    // 例如：
+    // - Walk / Run 是 Interruptible，任何时候都能被 Idle, Jump, Crouch 打断。
+    // - JumpStart 是 MustFinish，在锁时间结束前，不允许 FallLoop/Walk/Run 抢走播放权。
+    if (!CanInterruptCurrentLocomotion(CurrentLocomotionState))
+    {
+        return;
+    }
+
+    PlayLocomotionAnimation(CurrentLocomotionState);
+    PreviousLocomotionState = CurrentLocomotionState;
+}
+
+const FNativeLocomotionAnimationSet* UWomenNativeAnimInstance::GetAnimationSetForLocomotionState(EWomenNativeLocomotionState LocomotionState) const
+{
+    switch (LocomotionState)
+    {
+        case EWomenNativeLocomotionState::Idle: return &IdleAnimation;
+        case EWomenNativeLocomotionState::Walk: return &WalkAnimation;
+        case EWomenNativeLocomotionState::Run: return &RunAnimation;
+        case EWomenNativeLocomotionState::JumpStart: return &JumpStartAnimation;
+        case EWomenNativeLocomotionState::FallLoop: return &FallLoopAnimation;
+        case EWomenNativeLocomotionState::CrouchEnter: return &CrouchEnterAnimation;
+        case EWomenNativeLocomotionState::CrouchExit: return &CrouchExitAnimation;
+        case EWomenNativeLocomotionState::CrouchIdle: return &CrouchIdleAnimation;
+        case EWomenNativeLocomotionState::CrouchWalk: return &CrouchWalkAnimation;
+        default: return nullptr;
+    }
+}
+
+bool UWomenNativeAnimInstance::PlayLocomotionAnimation(EWomenNativeLocomotionState LocomotionState)
+{
+    const FNativeLocomotionAnimationSet* AnimationSet = GetAnimationSetForLocomotionState(LocomotionState);
+    UAnimSequenceBase* Animation = AnimationSet ? AnimationSet->Animation : nullptr;
+    if (!Animation || LocomotionSlotName.IsNone())
+    {
+        return false;
+    }
+
+    const bool bLoop = LocomotionState != EWomenNativeLocomotionState::JumpStart
+        && LocomotionState != EWomenNativeLocomotionState::CrouchEnter
+        && LocomotionState != EWomenNativeLocomotionState::CrouchExit;
+    PlaySlotAnimationAsDynamicMontage(
+        Animation,
+        LocomotionSlotName,
+        LocomotionBlendInTime,
+        LocomotionBlendOutTime,
+        1.f,
+        bLoop ? MAX_int32 : 1);
+
+    StartAnimationLockIfNeeded(*AnimationSet);
+
+    if (LocomotionState == EWomenNativeLocomotionState::CrouchEnter)
+    {
+        bPendingCrouchEnter = false;
+    }
+    else if (LocomotionState == EWomenNativeLocomotionState::CrouchExit)
+    {
+        bPendingCrouchExit = false;
+    }
+
+    return true;
+}
+
+bool UWomenNativeAnimInstance::CanInterruptCurrentLocomotion(EWomenNativeLocomotionState RequestedState) const
+{
+    if (!bAnimationTransitionLocked)
+    {
+        return true;
+    }
+
+    // 这里留一个“强制优先级”入口。
+    // 如果后面有受击、死亡、被抓等更高优先级动作，可以在这里允许它们无视锁直接打断。
+    // 现在的基础移动状态里，没有比 JumpStart 更高优先级的状态，所以锁住时直接拒绝绝切换。
+    return false;
+}
+
+void UWomenNativeAnimInstance::StartAnimationLockIfNeeded(const FNativeLocomotionAnimationSet& AnimationSet)
+{
+    if (AnimationSet.InterruptPolicy != EWomenNativeAnimationInterruptPolicy::MustFinish)
+    {
+        bAnimationTransitionLocked = false;
+        AnimationLockTimeRemaining = 0.f;
+        return;
+    }
+
+    float LockDuration = AnimationSet.LockDuration;
+    if (LockDuration <= 0.f && AnimationSet.Animation)
+    {
+        LockDuration = AnimationSet.Animation->GetPlayLength();
+    }
+
+    bAnimationTransitionLocked = LockDuration > 0.f;
+    AnimationLockTimeRemaining = FMath::Max(0.f, LockDuration);
+}
+
+void UWomenNativeAnimInstance::UpdateHoldTypeFromOwner()
+{
+    EHoldItemType NewHoldType = EHoldItemType::None;
+
+    APawn* PawnOwner = TryGetPawnOwner();
+    if (!PawnOwner)
+    {
+        CurrentHoldType = NewHoldType;
+        return;
+    }
+
+    if (AMyPlayerController* PlayerController = Cast<AMyPlayerController>(PawnOwner->GetController()))
+    {
+        if (APickupActor* HeldActor = PlayerController->GetHeldActor())
+        {
+            NewHoldType = HeldActor->GetHoldType();
+        }
+    }
+
+    if (NewHoldType == EHoldItemType::None)
+    {
+        TArray<AActor*> AttachedActors;
+        PawnOwner->GetAttachedActors(AttachedActors);
+
+        for (AActor* AttachedActor : AttachedActors)
+        {
+            APickupActor* PickupActor = Cast<APickupActor>(AttachedActor);
+            if (PickupActor && PickupActor->IsHeldByPlayer())
+            {
+                NewHoldType = PickupActor->GetHoldType();
+                break;
+            }
+        }
+    }
+
+    CurrentHoldType = NewHoldType;
+}
+
+void UWomenNativeAnimInstance::HandleHoldTypeChanged()
+{
+    if (CurrentHoldType == PreviousHoldType)
+    {
+        return;
+    }
+
+    const FNativeHoldAnimationSet* AnimationSet = HoldAnimations.Find(CurrentHoldType);
+    CurrentIdlePose = AnimationSet ? AnimationSet->IdlePose : nullptr;
+
+    if (CurrentHoldType != EHoldItemType::None)
+    {
+        PlayEquipMontageForHoldType(CurrentHoldType);
+    }
+
+    PreviousHoldType = CurrentHoldType;
+}
+
+void UWomenNativeAnimInstance::HandleThrowMontageState()
+{
+    // 投掷动作是“动作层”，不是“移动层”。
+    // 这里不会停止 Walk/Run。Walk/Run 继续由 LocomotionSlotName 播放。
+    // 投掷只播放到 UpperBodySlotName，然后由动画蓝图的 Layered Blend Per Bone 合并到上半身/右手。
+    if (bIsStandThrowing && !bWasStandThrowing)
+    {
+        PlayThrowAction(false);
+    }
+
+    if (bIsSquatThrowing && !bWasSquatThrowing)
+    {
+        PlayThrowAction(true);
+    }
+
+    bWasStandThrowing = bIsStandThrowing;
+    bWasSquatThrowing = bIsSquatThrowing;
+}
+
+bool UWomenNativeAnimInstance::PlayThrowAction(bool bSquatThrow)
+{
+    if (!CanPlayOneShotAction())
+    {
+        return false;
+    }
+
+    const bool bRunThrow = !bSquatThrow && IsRunningThrow();
+
+    UAnimSequenceBase* UpperBodyAnimation = nullptr;
+    if (bSquatThrow)
+    {
+        UpperBodyAnimation = SquatThrowUpperBodyAnimation.Get();
+    }
+    else if (bRunThrow)
+    {
+        UpperBodyAnimation = RunThrowUpperBodyAnimation.Get();
+    }
+    else
+    {
+        UpperBodyAnimation = StandThrowUpperBodyAnimation.Get();
+    }
+
+    if (UpperBodyAnimation)
+    {
+        return PlayOneShotAction(UpperBodyAnimation, nullptr);
+    }
+
+    UAnimMontage* ThrowMontage = nullptr;
+    if (bSquatThrow)
+    {
+        ThrowMontage = SquatThrowMontage.Get();
+    }
+    else if (bRunThrow)
+    {
+        ThrowMontage = RunThrowMontage.Get();
+    }
+    else
+    {
+        ThrowMontage = StandThrowMontage.Get();
+    }
+
+    if (!ThrowMontage)
+    {
+        return false;
+    }
+
+    return PlayOneShotAction(nullptr, ThrowMontage);
+}
+
+bool UWomenNativeAnimInstance::IsRunningThrow() const
+{
+    return CurrentLocomotionState == EWomenNativeLocomotionState::Run
+        || (bIsSprint && Speed > MoveSpeedThreshold);
+}
+
+bool UWomenNativeAnimInstance::PlayUpperBodyAnimation(UAnimSequenceBase* Animation, bool bLoop)
+{
+    if (!Animation || UpperBodySlotName.IsNone())
+    {
+        return false;
+    }
+
+    PlaySlotAnimationAsDynamicMontage(
+        Animation,
+        UpperBodySlotName,
+        UpperBodyBlendInTime,
+        UpperBodyBlendOutTime,
+        1.f,
+        bLoop ? MAX_int32 : 1);
+
+    return true;
+}
+
+bool UWomenNativeAnimInstance::PlayOpenDoorAction()
+{
+    const bool bCrouchAction = IsCrouchAction();
+    UAnimSequenceBase* UpperBodyAnimation = bCrouchAction
+        ? SquatOpenDoorUpperBodyAnimation.Get()
+        : StandOpenDoorUpperBodyAnimation.Get();
+    UAnimMontage* Montage = bCrouchAction
+        ? SquatOpenDoorMontage.Get()
+        : StandOpenDoorMontage.Get();
+
+    return PlayOneShotAction(UpperBodyAnimation, Montage);
+}
+
+bool UWomenNativeAnimInstance::PlayHitAction()
+{
+    const bool bCrouchAction = IsCrouchAction();
+    UAnimSequenceBase* UpperBodyAnimation = bCrouchAction 
+        ? SquatHitUpperBodyAnimation.Get() 
+        : StandHitUpperBodyAnimation.Get();
+    UAnimMontage* Montage = bCrouchAction 
+        ? SquatHitMontage.Get() 
+        : StandHitMontage.Get();
+
+    return PlayOneShotAction(UpperBodyAnimation, Montage);
+}
+
+bool UWomenNativeAnimInstance::IsCrouchAction() const
+{
+    return bIsSquat
+        || CurrentLocomotionState == EWomenNativeLocomotionState::CrouchEnter
+        || CurrentLocomotionState == EWomenNativeLocomotionState::CrouchIdle
+        || CurrentLocomotionState == EWomenNativeLocomotionState::CrouchWalk;
+}
+
+bool UWomenNativeAnimInstance::CanPlayOneShotAction() const
+{
+    return !bOneShotActionLocked;
+}
+
+bool UWomenNativeAnimInstance::PlayOneShotAction(UAnimSequenceBase* UpperBodyAnimation, UAnimMontage* Montage)
+{
+    if (!CanPlayOneShotAction())
+    {
+        return false;
+    }
+
+    float LockDuration = 0.f;
+    bool bPlayed = false;
+
+    if (UpperBodyAnimation && !UpperBodySlotName.IsNone())
+    {
+        PlaySlotAnimationAsDynamicMontage(
+            UpperBodyAnimation,
+            UpperBodySlotName,
+            UpperBodyBlendInTime,
+            UpperBodyBlendOutTime,
+            1.f,
+            1
+        );
+
+        LockDuration = UpperBodyAnimation->GetPlayLength();
+        bPlayed = true;
+    }
+    else if (Montage)
+    {
+        // 注意：Montage 自己的 Slot 必须设置成 UpperBody，否则它仍会按 Montage 里的 Slot 播放。
+        Montage_Play(Montage);
+        LockDuration = Montage->GetPlayLength();
+        bPlayed = true;
+    }
+
+    if (bPlayed)
+    {
+        StartOneShotActionLock(LockDuration);
+    }
+
+    return bPlayed;
+}
+
+void UWomenNativeAnimInstance::StartOneShotActionLock(float LockDuration)
+{
+    bOneShotActionLocked = LockDuration > 0.f;
+    OneShotActionLockTimeRemaining = FMath::Max(0.f, LockDuration);
+}
+
+bool UWomenNativeAnimInstance::PlayEquipMontageForHoldType(EHoldItemType HoldItemType)
+{
+    const FNativeHoldAnimationSet* AnimationSet = HoldAnimations.Find(HoldItemType);
+    if (!AnimationSet || !AnimationSet->EquipMontage)
+    {
+        return false;
+    }
+
+    Montage_Play(AnimationSet->EquipMontage);
+    return true;
+}
+
+bool UWomenNativeAnimInstance::PlayUseMontageForHoldType(EHoldItemType HoldItemType)
+{
+    const FNativeHoldAnimationSet* AnimationSet = HoldAnimations.Find(HoldItemType);
+    if (!AnimationSet || !AnimationSet->UseMontage)
+    {
+        return false;
+    }
+
+    Montage_Play(AnimationSet->UseMontage);
+    return true;
 }
